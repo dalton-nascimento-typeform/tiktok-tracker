@@ -10,7 +10,9 @@ REQUIRED_COLUMNS = [
 
 def process_files(tiktok_file, dcm_files):
     df_main = pd.read_excel(tiktok_file, sheet_name=None)
-    sheet_name = [s for s in df_main.keys() if s.startswith("ExportAds")][0]
+    sheet_name = next((s for s in df_main.keys() if s.startswith("ExportAds")), None)
+    if not sheet_name:
+        sheet_name = list(df_main.keys())[0]
     df_main = df_main[sheet_name]
 
     df_main['Campaign Name norm'] = df_main['Campaign Name'].astype(str).str.strip().str.lower()
