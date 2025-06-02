@@ -20,15 +20,20 @@ def process_files(tiktok_file, dcm_files):
             df_tags_list.append(df)
     df_tags = pd.concat(df_tags_list, ignore_index=True) if df_tags_list else pd.DataFrame(columns=REQUIRED_COLUMNS)
 
+    # Normalize columns for matching
+    df_tags['Campaign Name'] = df_tags['Campaign Name'].astype(str).str.strip().str.lower()
+    df_tags['Placement Name'] = df_tags['Placement Name'].astype(str).str.strip().str.lower()
+    df_tags['Ad Name'] = df_tags['Ad Name'].astype(str).str.strip().str.lower()
+
     for i, row in df_main.iterrows():
-        campaign = str(row['Campaign Name']).strip()
-        adgroup = str(row['Ad Group Name']).strip()
-        adname = str(row['Ad Name']).strip()
+        campaign = str(row['Campaign Name']).strip().lower()
+        adgroup = str(row['Ad Group Name']).strip().lower()
+        adname = str(row['Ad Name']).strip().lower()
 
         tag_row = df_tags[
-            (df_tags['Campaign Name'].astype(str).str.strip() == campaign) &
-            (df_tags['Placement Name'].astype(str).str.strip() == adgroup) &
-            (df_tags['Ad Name'].astype(str).str.strip() == adname)
+            (df_tags['Campaign Name'] == campaign) &
+            (df_tags['Placement Name'] == adgroup) &
+            (df_tags['Ad Name'] == adname)
         ]
 
         if not tag_row.empty:
@@ -38,13 +43,13 @@ def process_files(tiktok_file, dcm_files):
         url = str(row['Web URL'])
         has_utm = "utm_campaign=" in url and "tf_campaign=" in url
         if has_utm:
-            url = re.sub(r'utm_campaign=[^&]+', f'utm_campaign={campaign}', url)
-            url = re.sub(r'tf_campaign=[^&]+', f'tf_campaign={campaign}', url)
+            url = re.sub(r'utm_campaign=[^&]+', f'utm_campaign={row["Campaign Name"]}', url)
+            url = re.sub(r'tf_campaign=[^&]+', f'tf_campaign={row["Campaign Name"]}', url)
         else:
             if '?' not in url:
-                url += f"?utm_source=tiktok&utm_medium=cpc&utm_campaign={campaign}&tf_campaign={campaign}"
+                url += f"?utm_source=tiktok&utm_medium=cpc&utm_campaign={row['Campaign Name']}&tf_campaign={row['Campaign Name']}"
             else:
-                url += f"&utm_source=tiktok&utm_medium=cpc&utm_campaign={campaign}&tf_campaign={campaign}"
+                url += f"&utm_source=tiktok&utm_medium=cpc&utm_campaign={row['Campaign Name']}&tf_campaign={row['Campaign Name']}"
         df_main.at[i, 'Web URL'] = url
 
     output = io.BytesIO()
