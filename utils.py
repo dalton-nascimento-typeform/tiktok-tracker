@@ -3,7 +3,7 @@ import pandas as pd
 import io
 import re
 
-REQUIRED_COLUMNS = {'Campaign Name', 'Placement Name', 'Ad Name', 'Impression Tag (image)', 'Click Tag'}
+REQUIRED_COLUMNS = ['Campaign Name', 'Placement Name', 'Ad Name', 'Impression Tag (image)', 'Click Tag']
 
 def extract_url_from_img_tag(tag):
     match = re.search(r'<IMG SRC="([^"]+)"', str(tag))
@@ -16,7 +16,7 @@ def process_files(tiktok_file, dcm_files):
     df_tags_list = []
     for file in dcm_files:
         df = pd.read_excel(file)
-        if REQUIRED_COLUMNS.issubset(set(df.columns)):
+        if set(REQUIRED_COLUMNS).issubset(set(df.columns)):
             df_tags_list.append(df)
     df_tags = pd.concat(df_tags_list, ignore_index=True) if df_tags_list else pd.DataFrame(columns=REQUIRED_COLUMNS)
 
