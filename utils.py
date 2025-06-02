@@ -1,72 +1,70 @@
 import pandas as pd
-from io import BytesIO
+import io
+import re
 
-REQUIRED_COLUMNS = ['Campaign Name', 'Ad Group Name', 'Ad Name', 'Impression Tag (image)', 'Click Tag']
+REQUIRED_COLUMNS = [
+    'Campaign Name', 'Placement Name', 'Ad Name', 'Impression Tag (image)', 'Click Tag'
+]
 
-def extract_first_quote(text):
-    try:
-        return text.split('"')[1]
-    except (IndexError, AttributeError):
-        return None
-
-def update_url(url, campaign_name):
-    from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
-
-    if not isinstance(url, str):
-        return url
-
-    parsed = urlparse(url)
-    query = parse_qs(parsed.query)
-
-    # Update or add utm_campaign and tf_campaign
-    query["utm_campaign"] = [campaign_name]
-    query["tf_campaign"] = [campaign_name]
-
-    new_query = urlencode(query, doseq=True)
-    new_url = urlunparse(parsed._replace(query=new_query))
-    return new_url
+def extract_impression_url(tag):
+    if pd.isna(tag): return None
+    match = re.search(r'<IMG SRC="([^"]+)"', tag)
+    return match.group(1) if match else None
 
 def process_files(tiktok_file, dcm_files):
-    df_main = pd.read_excel(tiktok_file, sheet_name=None)
-    sheet_name = [s for s in df_main.keys() if s.startswith("ExportAds")][0]
-    df_main = df_main[sheet_name]
+    # Read TikTok Export file and identify sheet
+    df_main_all = pd.read_excel(tiktok_file, sheet_name=None)
+    sheet_candidates = [s for s in df_main_all.keys() if "ExportAds" in s]
+    if not sheet_candidates:
+        raise ValueError("No sheet with 'ExportAds' in the name was found in the TikTok file.")
+    df_main = df_main_all[sheet_candidates[0]]
 
+    # Read all DCM sheets and normalize them into a single DataFrame
     df_tags_list = []
     for f in dcm_files:
-        df = pd.read_excel(f)
-        if set(REQUIRED_COLUMNS).issubset(df.columns):
-            df_tags_list.append(df)
+        try:
+            df = pd.read_excel(f)
+            if all(col in df.columns for col in REQUIRED_COLUMNS):
+                df_tags_list.append(df)
+        except Exception as e:
+            continue
 
     df_tags = pd.concat(df_tags_list, ignore_index=True) if df_tags_list else pd.DataFrame(columns=REQUIRED_COLUMNS)
 
-    for idx, row in df_main.iterrows():
-        campaign = str(row["Campaign Name"]).strip()
-        adgroup = str(row["Ad Group Name"]).strip()
-        adname = str(row["Ad Name"]).strip()
+    # Update tracking URLs in TikTok file (Column DN)
+    if "Campaign Name" in df_main.columns and "Ad Name" in df_main.columns and "Ad Group Name" in df_main.columns:
+        for i, row in df_main.iterrows():
+            campaign = str(row["Campaign Name"]).strip()
+            adgroup = str(row["Ad Group Name"]).strip()
+            adname = str(row["Ad Name"]).strip()
+            url = row.get("Web URL", "")
 
-        # Update Web URL with UTM & TF parameters
-        if "Web URL" in df_main.columns:
-            original_url = row["Web URL"]
-            updated_url = update_url(original_url, campaign)
-            df_main.at[idx, "Web URL"] = updated_url
+            if pd.isna(url): continue
 
-        # Match tags
-        match = df_tags[
-            (df_tags['Campaign Name'].astype(str).str.strip() == campaign) &
-            (df_tags['Ad Group Name'].astype(str).str.strip() == adgroup) &
-            (df_tags['Ad Name'].astype(str).str.strip() == adname)
-        ]
+            # Replace existing TF and UTM parameters
+            url = re.sub(r'utm_campaign=__CAMPAIGN_NAME__', f'utm_campaign={campaign}', url)
+            url = re.sub(r'tf_campaign=([^&]+)', f'tf_campaign={campaign}', url)
 
-        if not match.empty:
-            imp_tag = extract_first_quote(match.iloc[0]['Impression Tag (image)'])
-            click_tag = match.iloc[0]['Click Tag']
-            if "Impression Tracking URL" in df_main.columns:
-                df_main.at[idx, "Impression Tracking URL"] = imp_tag
-            if "Click Tracking URL" in df_main.columns:
-                df_main.at[idx, "Click Tracking URL"] = click_tag
+            if "utm_campaign" not in url:
+                delimiter = "&" if "?" in url else "?"
+                url += f"{delimiter}utm_source=tiktok&utm_medium=cpc&utm_campaign={campaign}&tf_campaign={campaign}"
 
-    output = BytesIO()
+            df_main.at[i, "Web URL"] = url
+
+            # Match tracking data from DCM sheets
+            matches = df_tags[
+                (df_tags["Campaign Name"].astype(str).str.strip() == campaign) &
+                (df_tags["Placement Name"].astype(str).str.strip() == adgroup) &
+                (df_tags["Ad Name"].astype(str).str.strip() == adname)
+            ]
+
+            if not matches.empty:
+                df_main.at[i, "Impression Tracking URL"] = extract_impression_url(matches.iloc[0]["Impression Tag (image)"])
+                df_main.at[i, "Click Tracking URL"] = matches.iloc[0]["Click Tag"]
+
+    # Export back to Excel
+    output = io.BytesIO()
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-        df_main.to_excel(writer, sheet_name=sheet_name, index=False)
+        df_main.to_excel(writer, index=False, sheet_name="Updated_Export")
     output.seek(0)
     return output
