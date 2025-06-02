@@ -1,80 +1,72 @@
-
 import pandas as pd
-import io
-import re
+from io import BytesIO
 
-REQUIRED_COLUMNS = [
-    "Campaign Name", "Placement Name", "Ad Name", "Impression Tag (image)", "Click Tag"
-]
+REQUIRED_COLUMNS = ['Campaign Name', 'Ad Group Name', 'Ad Name', 'Impression Tag (image)', 'Click Tag']
 
-def clean_tag_url(tag):
-    match = re.search(r'\"(https[^"]+)\"', tag)
-    return match.group(1) if match else ""
+def extract_first_quote(text):
+    try:
+        return text.split('"')[1]
+    except (IndexError, AttributeError):
+        return None
+
+def update_url(url, campaign_name):
+    from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
+
+    if not isinstance(url, str):
+        return url
+
+    parsed = urlparse(url)
+    query = parse_qs(parsed.query)
+
+    # Update or add utm_campaign and tf_campaign
+    query["utm_campaign"] = [campaign_name]
+    query["tf_campaign"] = [campaign_name]
+
+    new_query = urlencode(query, doseq=True)
+    new_url = urlunparse(parsed._replace(query=new_query))
+    return new_url
 
 def process_files(tiktok_file, dcm_files):
     df_main = pd.read_excel(tiktok_file, sheet_name=None)
     sheet_name = [s for s in df_main.keys() if s.startswith("ExportAds")][0]
-    df_tiktok = df_main[sheet_name]
-
-    # Normalize columns
-    df_tiktok.columns = df_tiktok.columns.str.strip()
+    df_main = df_main[sheet_name]
 
     df_tags_list = []
     for f in dcm_files:
-        # Try to read with header at row 10 (zero-indexed row 9)
-        try:
-            df = pd.read_excel(f, header=10)
-            if not all(col in df.columns for col in REQUIRED_COLUMNS):
-                continue
+        df = pd.read_excel(f)
+        if set(REQUIRED_COLUMNS).issubset(df.columns):
             df_tags_list.append(df)
-        except Exception:
-            continue
 
     df_tags = pd.concat(df_tags_list, ignore_index=True) if df_tags_list else pd.DataFrame(columns=REQUIRED_COLUMNS)
 
-    # UTM and tf_campaign updates
-    def update_url(row):
-        url = row['Web URL']
-        campaign = str(row['Campaign Name']).strip()
-        if not isinstance(url, str):
-            return url
+    for idx, row in df_main.iterrows():
+        campaign = str(row["Campaign Name"]).strip()
+        adgroup = str(row["Ad Group Name"]).strip()
+        adname = str(row["Ad Name"]).strip()
 
-        # Replace tokens
-        if "__CAMPAIGN_NAME__" in url:
-            url = re.sub(r'utm_campaign=__CAMPAIGN_NAME__', f'utm_campaign={campaign}', url)
-        if "tf_campaign=" in url:
-            url = re.sub(r'tf_campaign=[^&]*', f'tf_campaign={campaign}', url)
+        # Update Web URL with UTM & TF parameters
+        if "Web URL" in df_main.columns:
+            original_url = row["Web URL"]
+            updated_url = update_url(original_url, campaign)
+            df_main.at[idx, "Web URL"] = updated_url
 
-        # If no UTM, add default
-        if "utm_campaign" not in url and "tf_campaign" not in url:
-            separator = '&' if '?' in url else '?'
-            url += f"{separator}utm_source=tiktok&utm_medium=cpc&utm_campaign={campaign}&tf_source=tiktok&utm_term=ad&tf_campaign={campaign}"
-        return url
-
-    df_tiktok['Web URL'] = df_tiktok.apply(update_url, axis=1)
-
-    # Match DCM tags
-    def get_tag(camp, placement, adname, col):
-        df_match = df_tags[
-            (df_tags['Campaign Name'].astype(str).str.strip() == str(camp).strip()) &
-            (df_tags['Placement Name'].astype(str).str.strip() == str(placement).strip()) &
-            (df_tags['Ad Name'].astype(str).str.strip() == str(adname).strip())
+        # Match tags
+        match = df_tags[
+            (df_tags['Campaign Name'].astype(str).str.strip() == campaign) &
+            (df_tags['Ad Group Name'].astype(str).str.strip() == adgroup) &
+            (df_tags['Ad Name'].astype(str).str.strip() == adname)
         ]
-        if not df_match.empty:
-            val = df_match.iloc[0][col]
-            return clean_tag_url(val) if pd.notna(val) else ""
-        return ""
 
-    df_tiktok['Impression Tracking URL'] = df_tiktok.apply(
-        lambda row: get_tag(row['Campaign Name'], row['Ad Group Name'], row['Ad Name'], 'Impression Tag (image)'), axis=1
-    )
-    df_tiktok['Click Tracking URL'] = df_tiktok.apply(
-        lambda row: get_tag(row['Campaign Name'], row['Ad Group Name'], row['Ad Name'], 'Click Tag'), axis=1
-    )
+        if not match.empty:
+            imp_tag = extract_first_quote(match.iloc[0]['Impression Tag (image)'])
+            click_tag = match.iloc[0]['Click Tag']
+            if "Impression Tracking URL" in df_main.columns:
+                df_main.at[idx, "Impression Tracking URL"] = imp_tag
+            if "Click Tracking URL" in df_main.columns:
+                df_main.at[idx, "Click Tracking URL"] = click_tag
 
-    # Write output to buffer
-    output = io.BytesIO()
+    output = BytesIO()
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-        df_tiktok.to_excel(writer, index=False, sheet_name=sheet_name)
+        df_main.to_excel(writer, sheet_name=sheet_name, index=False)
     output.seek(0)
     return output
