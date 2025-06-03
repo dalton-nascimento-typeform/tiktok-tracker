@@ -2,65 +2,43 @@
 import pandas as pd
 from io import BytesIO
 
-def process_files(tiktok_file, tag_files):
-    df_main = pd.read_excel(tiktok_file, sheet_name=None, header=10)
-    sheet_name = "Ads" if "Ads" in df_main else list(df_main.keys())[0]
-    df_ads = df_main[sheet_name]
-
+def process_files(tiktok_file, dcm_files):
+    df_ads = pd.read_excel(tiktok_file, sheet_name="Ads", header=10)
     df_ads.columns = df_ads.columns.str.strip()
-    required_cols = ["Campaign Name", "Ad Group Name", "Ad Name", "Click URL"]
-    for col in required_cols:
-        if col not in df_ads.columns:
-            raise KeyError(f"{col}")
 
     df_tags_list = []
-    for f in tag_files:
-        tags_df = pd.read_excel(f, header=10)
-        tags_df.columns = tags_df.columns.str.strip()
-        if "Campaign Name" not in tags_df.columns:
-            continue
-        df_tags_list.append(tags_df)
-
-    if not df_tags_list:
-        raise ValueError("No valid tag data found. Make sure the sheets include 'Campaign Name'.")
+    for f in dcm_files:
+        xls = pd.ExcelFile(f)
+        sheet = [s for s in xls.sheet_names if "Tracking Ads" in s][0]
+        df_tag = pd.read_excel(xls, sheet_name=sheet, header=10)
+        df_tag.columns = df_tag.columns.str.strip()
+        df_tags_list.append(df_tag)
 
     df_tags = pd.concat(df_tags_list, ignore_index=True)
 
-    for idx, row in df_ads.iterrows():
-        campaign = str(row["Campaign Name"]).strip()
-        placement = str(row["Ad Group Name"]).strip()
-        ad_name = str(row["Ad Name"]).strip()
+    def clean_url(url):
+        if isinstance(url, str):
+            url = url.strip()
+            if not url.startswith("http"):
+                return url
+            if "?" not in url:
+                url += "?"
+            if "utm_source" not in url:
+                url += "&utm_source=tiktok&utm_medium=paid"
+            if "tf_source" not in url:
+                url += "&tf_source=tiktok&tf_medium=paid_social"
+        return url
 
+    for i, row in df_ads.iterrows():
         match = df_tags[
-            (df_tags["Campaign Name"].astype(str).str.strip() == campaign) &
-            (df_tags["Placement Name"].astype(str).str.strip() == placement) &
-            (df_tags["Ad Name"].astype(str).str.strip() == ad_name)
+            (df_tags["Campaign Name"].astype(str).str.strip() == str(row["Campaign Name"]).strip()) &
+            (df_tags["Placement Name"].astype(str).str.strip() == str(row["Ad Group Name"]).strip()) &
+            (df_tags["Ad Name"].astype(str).str.strip() == str(row["Ad Name"]).strip())
         ]
-
-        original_url = row["Click URL"]
-        new_url = str(original_url) if pd.notna(original_url) else ""
-
-        if pd.notna(original_url):
-            if "utm_source=" not in new_url:
-                new_url += f"?utm_source=tiktok&utm_medium=paid&utm_campaign={campaign}&tf_campaign={campaign}"
-            if "tf_source=" not in new_url:
-                new_url += "&tf_source=tiktok"
-            if "tf_medium=" not in new_url:
-                new_url += "&tf_medium=paid_social"
-
         if not match.empty:
-            click_url = match.iloc[0].get("Click Tracker", "")
-            imp_url = match.iloc[0].get("Impression Tracker", "")
-
-            if click_url:
-                df_ads.at[idx, "Click URL"] = click_url
-            else:
-                df_ads.at[idx, "Click URL"] = new_url
-
-            if "Impression URL" in df_ads.columns:
-                df_ads.at[idx, "Impression URL"] = imp_url
-        else:
-            df_ads.at[idx, "Click URL"] = new_url
+            df_ads.at[i, "Impression Tracking URL"] = match["Impression URL"].values[0]
+            df_ads.at[i, "Click Tracking URL"] = match["Click URL"].values[0]
+        df_ads.at[i, "Final URL"] = clean_url(row["Final URL"])
 
     output = BytesIO()
     with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
