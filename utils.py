@@ -1,62 +1,54 @@
-
 import pandas as pd
-import io
-import re
+from io import BytesIO
+
+REQUIRED_COLUMNS = [
+    "Campaign Name", "Placement Name", "Ad Name",
+    "Impression Tracking URL", "Click Tracking URL", "Final URL"
+]
+
+def extract_campaign_name(df):
+    for _, row in df.iterrows():
+        for cell in row:
+            if isinstance(cell, str) and "Campaign Name" in cell:
+                return row[row.first_valid_index() + 1]
+    return None
 
 def process_files(tiktok_file, dcm_files):
     df_main = pd.read_excel(tiktok_file, sheet_name=None)
-    sheet_name = [s for s in df_main.keys() if "ads" in s.lower()][0]
-    df_ads = df_main[sheet_name]
-
+    ads_sheet_name = [s for s in df_main if "Ads" in s][0]
+    df_ads = df_main[ads_sheet_name]
+    
     df_tags_list = []
     for f in dcm_files:
-        try:
-            df_tags_list.append(pd.read_excel(f, sheet_name="Tracking Ads"))
-        except:
-            df_tags_list.append(pd.read_excel(f))  # fallback
-
-    df_tags = pd.concat(df_tags_list, ignore_index=True) if df_tags_list else pd.DataFrame()
-
-    if df_tags.empty:
-        raise ValueError("No tracking tags found.")
-
-    def get_tag(campaign, placement, tag_type):
-        subset = df_tags[
-            (df_tags['Campaign Name'].astype(str).str.strip() == campaign) &
-            (df_tags['Placement Name'].astype(str).str.strip() == placement)
-        ]
-        if subset.empty:
-            return ""
-        return subset.iloc[0][f"{tag_type} Tag"] if f"{tag_type} Tag" in subset.columns else ""
+        df = pd.read_excel(f, header=None)
+        campaign_name = extract_campaign_name(df)
+        if campaign_name:
+            tracking_df = pd.read_excel(f, sheet_name="Tracking Ads", skiprows=10)
+            tracking_df["Campaign Name"] = campaign_name
+            df_tags_list.append(tracking_df)
+    
+    df_tags = pd.concat(df_tags_list, ignore_index=True) if df_tags_list else pd.DataFrame(columns=REQUIRED_COLUMNS)
 
     for i, row in df_ads.iterrows():
-        campaign = str(row.get('Campaign Name', '')).strip()
-        placement = str(row.get('Placement Name', '')).strip()
-        url = str(row.get('Ad Click URL', '')).strip()
+        campaign = row.get("Campaign Name")
+        ad_name = row.get("Ad Name")
+        match = df_tags[
+            (df_tags["Campaign Name"].astype(str).str.strip() == str(campaign).strip()) &
+            (df_tags["Ad Name"].astype(str).str.strip() == str(ad_name).strip())
+        ]
+        if not match.empty:
+            df_ads.at[i, "Click Tracking URL"] = match["Click Tracking URL"].values[0]
+            df_ads.at[i, "Impression Tracking URL"] = match["Impression Tracking URL"].values[0]
 
-        click_tag = get_tag(campaign, placement, 'Click')
-        imp_tag = get_tag(campaign, placement, 'Impression')
+        # Ensure UTM parameters are added
+        final_url = str(row.get("Final URL", ""))
+        if final_url and "tf_source=" not in final_url and "tf_medium=" not in final_url:
+            sep = "&" if "?" in final_url else "?"
+            final_url += f"{sep}tf_source=tiktok&tf_medium=paid_social"
+            df_ads.at[i, "Final URL"] = final_url
 
-        # Replace placeholders with actual tags
-        if "[INSERT_CLICK_TRACKER_HERE]" in url and click_tag:
-            url = url.replace("[INSERT_CLICK_TRACKER_HERE]", click_tag)
-        if "[INSERT_IMPRESSION_TRACKER_HERE]" in url and imp_tag:
-            url = url.replace("[INSERT_IMPRESSION_TRACKER_HERE]", imp_tag)
-
-        # Append tf_source and tf_medium if not present
-        if "tf_source=" not in url:
-            url += "&tf_source=tiktok"
-        if "tf_medium=" not in url:
-            url += "&tf_medium=paid_social"
-
-        # Fix incorrect '?' placement
-        if '?' not in str(row.get('Ad Click URL', '')):
-            url = url.replace('&', '?', 1)
-
-        df_ads.at[i, 'Ad Click URL'] = url
-
-    output = io.BytesIO()
+    output = BytesIO()
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-        df_ads.to_excel(writer, sheet_name=sheet_name, index=False)
+        df_ads.to_excel(writer, sheet_name=ads_sheet_name, index=False)
     output.seek(0)
     return output
