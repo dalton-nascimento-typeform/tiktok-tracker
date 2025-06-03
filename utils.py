@@ -1,65 +1,52 @@
+
 import pandas as pd
-from io import BytesIO
-import re
-
-def clean_url(url):
-    url = str(url)
-    url = re.sub(r"[?&](utm|tf)_[^=]+=[^&]*", "", url)
-    url = re.sub(r"[?&]$", "", url)
-    return url
-
-def append_params(url, utm, tf):
-    if "?" in url:
-        url += "&" + utm + "&" + tf
-    else:
-        url += "?" + utm + "&" + tf
-    return url
-
-def ensure_tf_source_medium(url):
-    url = str(url)
-    if "&tf_source=" not in url:
-        url += "&tf_source=tiktok"
-    if "&tf_medium=" not in url:
-        url += "&tf_medium=paid_social"
-    return url
+import io
 
 def process_files(tiktok_file, dcm_files):
-    df_ads = pd.read_excel(tiktok_file, sheet_name="Ads")
-
-    df_ads["Click URL"] = df_ads["Click URL"].astype(str)
+    df_main = pd.read_excel(tiktok_file, sheet_name=None)
+    sheet_name = [s for s in df_main.keys() if s.lower().strip() == "ads"][0]
+    df_ads = df_main[sheet_name]
 
     df_tags_list = []
     for f in dcm_files:
-        df_tag = pd.read_excel(f, header=10)
-        df_tags_list.append(df_tag)
-    df_tags = pd.concat(df_tags_list, ignore_index=True)
+        df = pd.read_excel(f, sheet_name=None)
+        for sheet in df.values():
+            if "Campaign Name" in sheet.columns:
+                campaign_name = sheet["Campaign Name"].iloc[0]
+                tags = sheet.dropna(subset=["Placement Name", "Impression Tracking URL", "Click Tracking URL"], how="all")
+                tags["Campaign Name"] = campaign_name
+                df_tags_list.append(tags)
 
-    for i, row in df_ads.iterrows():
-        campaign = row["Campaign Name"]
-        ad = row["Ad Name"]
+    df_tags = pd.concat(df_tags_list, ignore_index=True) if df_tags_list else pd.DataFrame()
 
-        match = df_tags[
-            (df_tags["Campaign Name"].astype(str).str.strip() == str(campaign).strip()) &
-            (df_tags["Ad Name"].astype(str).str.strip() == str(ad).strip())
-        ]
+    if df_tags.empty:
+        raise ValueError("No valid tag data found. Make sure the sheets include 'Campaign Name'.")
 
-        if not match.empty:
-            tag_row = match.iloc[0]
-            utm_params = tag_row.get("Click Tracker URL", "")
-            imp_tag = tag_row.get("Impression Tracker URL", "")
-            tf_params = tag_row.get("TF Tracking URL", "")
+    def update_url(row):
+        url = str(row["Click URL"]).strip()
+        if not url or url.lower() == "nan":
+            return url
 
-            if pd.notna(utm_params) or pd.notna(tf_params):
-                clean = clean_url(row["Click URL"])
-                combined_url = append_params(clean, utm_params, tf_params)
-                combined_url = ensure_tf_source_medium(combined_url)
-                df_ads.at[i, "Click URL"] = combined_url
+        if "utm_source" not in url:
+            separator = "&" if "?" in url else "?"
+            url += f"{separator}utm_source=tiktok&utm_medium=paid&utm_campaign={row['Campaign Name']}&tf_campaign={row['Campaign Name']}"
+        if "tf_source" not in url:
+            url += "&tf_source=tiktok"
+        if "tf_medium" not in url:
+            url += "&tf_medium=paid_social"
+        return url
 
-            if pd.notna(imp_tag):
-                df_ads.at[i, "Impression Tracking URL"] = imp_tag
+    df_ads["Click URL"] = df_ads.apply(update_url, axis=1)
 
-    output = BytesIO()
+    for _, tag in df_tags.iterrows():
+        match = df_ads["Ad Name"].astype(str).str.strip() == str(tag["Placement Name"]).strip()
+        if "Click Tracking URL" in tag and pd.notna(tag["Click Tracking URL"]):
+            df_ads.loc[match, "Click URL"] = tag["Click Tracking URL"]
+        if "Impression Tracking URL" in tag and pd.notna(tag["Impression Tracking URL"]):
+            df_ads.loc[match, "Impression URL"] = tag["Impression Tracking URL"]
+
+    output = io.BytesIO()
     with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
-        df_ads.to_excel(writer, sheet_name="Ads", index=False)
+        df_ads.to_excel(writer, index=False, sheet_name="Ads")
     output.seek(0)
     return output
