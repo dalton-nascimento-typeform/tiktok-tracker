@@ -2,57 +2,65 @@
 import pandas as pd
 from io import BytesIO
 
-def clean_url(url, campaign_name):
-    if pd.isna(url) or not isinstance(url, str):
-        return url
-    url = url.strip()
-    if "utm_source=" not in url:
-        url += ("&" if "?" in url else "?") + "utm_source=tiktok&utm_medium=paid"
-    if "utm_campaign=" not in url:
-        url += "&utm_campaign=" + campaign_name
-    if "tf_campaign=" not in url:
-        url += "&tf_campaign=" + campaign_name
-    if "tf_source=" not in url:
-        url += "&tf_source=tiktok"
-    if "tf_medium=" not in url:
-        url += "&tf_medium=paid_social"
-    return url
-
-def process_files(tiktok_file, dcm_files):
+def process_files(tiktok_file, tag_files):
     df_main = pd.read_excel(tiktok_file, sheet_name=None, header=10)
     sheet_name = "Ads" if "Ads" in df_main else list(df_main.keys())[0]
-    df_ads = df_main[sheet_name].copy()
+    df_ads = df_main[sheet_name]
 
-    df_tags_list = [pd.read_excel(f, sheet_name=None, header=10) for f in dcm_files]
-    df_tags_combined = pd.concat(
-        [df[s] for df in df_tags_list for s in df if "Tracking Ads" in s], ignore_index=True
-    )
+    df_ads.columns = df_ads.columns.str.strip()
+    required_cols = ["Campaign Name", "Ad Group Name", "Ad Name", "Click URL"]
+    for col in required_cols:
+        if col not in df_ads.columns:
+            raise KeyError(f"{col}")
+
+    df_tags_list = []
+    for f in tag_files:
+        tags_df = pd.read_excel(f, header=10)
+        tags_df.columns = tags_df.columns.str.strip()
+        if "Campaign Name" not in tags_df.columns:
+            continue
+        df_tags_list.append(tags_df)
+
+    if not df_tags_list:
+        raise ValueError("No valid tag data found. Make sure the sheets include 'Campaign Name'.")
+
+    df_tags = pd.concat(df_tags_list, ignore_index=True)
 
     for idx, row in df_ads.iterrows():
-        try:
-            campaign = str(row["Campaign Name"]).strip()
-            ad_group = str(row["Ad Group Name"]).strip()
-            ad_name = str(row["Ad Name"]).strip()
-        except KeyError as e:
-            raise ValueError(f"Missing column in Export Ads: {e}")
+        campaign = str(row["Campaign Name"]).strip()
+        placement = str(row["Ad Group Name"]).strip()
+        ad_name = str(row["Ad Name"]).strip()
 
-        matches = df_tags_combined[
-            (df_tags_combined["Campaign Name"].astype(str).str.strip() == campaign) &
-            (df_tags_combined["Placement Name"].astype(str).str.strip() == ad_group) &
-            (df_tags_combined["Ad Name"].astype(str).str.strip() == ad_name)
+        match = df_tags[
+            (df_tags["Campaign Name"].astype(str).str.strip() == campaign) &
+            (df_tags["Placement Name"].astype(str).str.strip() == placement) &
+            (df_tags["Ad Name"].astype(str).str.strip() == ad_name)
         ]
 
-        click_tracker = matches["Click Tracking URL"].values[0] if "Click Tracking URL" in matches and not matches.empty else None
-        impression_tracker = matches["Impression Tracking URL"].values[0] if "Impression Tracking URL" in matches and not matches.empty else None
+        original_url = row["Click URL"]
+        new_url = str(original_url) if pd.notna(original_url) else ""
 
-        url = row.get("Click URL", "")
-        updated_url = clean_url(url, campaign)
-        if click_tracker and "[click_tracker]" not in updated_url:
-            updated_url += f"&click_tracker={click_tracker}"
-        df_ads.at[idx, "Click URL"] = updated_url
+        if pd.notna(original_url):
+            if "utm_source=" not in new_url:
+                new_url += f"?utm_source=tiktok&utm_medium=paid&utm_campaign={campaign}&tf_campaign={campaign}"
+            if "tf_source=" not in new_url:
+                new_url += "&tf_source=tiktok"
+            if "tf_medium=" not in new_url:
+                new_url += "&tf_medium=paid_social"
 
-        if impression_tracker:
-            df_ads.at[idx, "Impression URL"] = impression_tracker
+        if not match.empty:
+            click_url = match.iloc[0].get("Click Tracker", "")
+            imp_url = match.iloc[0].get("Impression Tracker", "")
+
+            if click_url:
+                df_ads.at[idx, "Click URL"] = click_url
+            else:
+                df_ads.at[idx, "Click URL"] = new_url
+
+            if "Impression URL" in df_ads.columns:
+                df_ads.at[idx, "Impression URL"] = imp_url
+        else:
+            df_ads.at[idx, "Click URL"] = new_url
 
     output = BytesIO()
     with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
