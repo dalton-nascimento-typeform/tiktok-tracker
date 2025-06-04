@@ -1,89 +1,107 @@
-
 import pandas as pd
 import io
+import zipfile
+import re
 
-def clean_url(url, tf_params, utm_params):
-    if not isinstance(url, str) or not url.strip():
-        return url
-    if "?" not in url:
-        url += "?" + "&".join(utm_params + tf_params)
-    else:
-        parts = url.split("?", 1)
-        base, query = parts[0], parts[1]
-        existing = query.split("&")
-        all_params = {p.split("=")[0]: p.split("=")[1] for p in existing if "=" in p}
-        for param in utm_params + tf_params:
-            k, v = param.split("=")
-            if k not in all_params:
-                existing.append(param)
-        url = base + "?" + "&".join(existing)
-    return url
+def clean_url(url):
+    return url.strip().replace('\u200b', '')
 
-def extract_impression_url(raw):
-    if not isinstance(raw, str):
-        return ""
-    if '"' in raw:
-        parts = raw.split('"')
-        for p in parts:
-            if p.startswith("http"):
-                return p.strip()
-    return raw.strip() if raw.startswith("http") else ""
+def extract_impression_url(cell_value):
+    if pd.isna(cell_value):
+        return None
+    match = re.search(r'"(https?://[^"]+)"', str(cell_value))
+    return match.group(1).strip() if match else None
 
 def process_files(tiktok_file, tag_files):
-    tiktok_df = pd.read_excel(tiktok_file, sheet_name="Ads")
-    required_cols = ["Campaign Name", "Placement Name", "Ad Name", "Click URL"]
-    for col in required_cols:
-        if col not in tiktok_df.columns:
-            raise ValueError(f"'{col}' not found in TikTok Ads sheet")
+    # Load TikTok Ads file
+    df_main = pd.read_excel(tiktok_file, sheet_name=None)
+    ads_sheet = df_main.get("Ads")
+    if ads_sheet is None:
+        raise ValueError("The TikTok file must contain a sheet named 'Ads'.")
 
-    tag_dfs = []
-    for f in tag_files:
-        df = pd.read_excel(f, header=10)
-        df = df.loc[:, ~df.columns.str.contains('^Unnamed')]
-        tag_dfs.append(df)
+    df_ads = ads_sheet.copy()
 
-    all_tags = pd.concat(tag_dfs, ignore_index=True)
-    if "Campaign Name" not in all_tags.columns:
+    # Check required columns
+    required_tiktok_cols = ['Campaign Name', 'Ad Group Name', 'Ad Name', 'Click URL']
+    for col in required_tiktok_cols:
+        if col not in df_ads.columns:
+            raise ValueError(f"Missing required column '{col}' in TikTok Ads sheet")
+
+    # Load all tag files
+    df_tags_list = []
+    for tag_file in tag_files:
+        df_tag_sheets = pd.read_excel(tag_file, sheet_name=None, header=10)  # Read from row 11
+        for sheet_name, df in df_tag_sheets.items():
+            if 'Campaign Name' in df.columns:
+                df_tags_list.append(df)
+
+    if not df_tags_list:
         raise ValueError("No valid tag data found. Make sure the sheets include 'Campaign Name'.")
 
-    click_map = {}
-    impr_map = {}
-    for _, row in all_tags.iterrows():
-        key = (
-            str(row.get("Campaign Name", "")).strip(),
-            str(row.get("Ad Group Name", "")).strip(),
-            str(row.get("Ad Name", "")).strip()
-        )
-        click_map[key] = row.get("Click Tag", "")
-        impr_map[key] = extract_impression_url(row.get("Impression Tag", ""))
+    df_tags_all = pd.concat(df_tags_list, ignore_index=True)
 
-    updated_rows = []
-    for _, row in tiktok_df.iterrows():
-        key = (
-            str(row["Campaign Name"]).strip(),
-            str(row["Placement Name"]).strip(),
-            str(row["Ad Name"]).strip()
-        )
-        updated_row = row.copy()
+    # Clean columns and data
+    df_ads['Click URL'] = df_ads['Click URL'].astype(str).apply(clean_url)
+    df_tags_all['Click Tracker'] = df_tags_all.get('Click Tracker', '').astype(str).apply(clean_url)
+    df_tags_all['Impression Tracker'] = df_tags_all.get('Impression Tracker', '').astype(str)
 
-        utm_params = [
-            f"utm_source=tiktok",
-            f"utm_medium=paid",
-            f"utm_campaign={row['Campaign Name']}"
-        ]
-        tf_params = [
-            f"tf_source=tiktok",
-            f"tf_medium=paid_social",
-            f"tf_campaign={row['Campaign Name']}"
+    # Prepare a list to collect impression trackers
+    impression_trackers = []
+
+    # Update URLs and add click/impression tags
+    updated_urls = []
+    for idx, row in df_ads.iterrows():
+        campaign = row['Campaign Name']
+        adgroup = row['Ad Group Name']
+        adname = row['Ad Name']
+        click_url = row['Click URL']
+
+        # Find matching tag row
+        matched_tag = df_tags_all[
+            (df_tags_all['Campaign Name'] == campaign) &
+            (df_tags_all['Placement Name'] == adgroup) &
+            (df_tags_all['Ad Name'] == adname)
         ]
 
-        updated_row["Click URL"] = clean_url(click_map.get(key, row["Click URL"]), tf_params, utm_params)
-        updated_row["Impression Tracking URL"] = impr_map.get(key, "")
-        updated_rows.append(updated_row)
+        if not matched_tag.empty:
+            tag_row = matched_tag.iloc[0]
+            click_tracker = tag_row.get('Click Tracker', '').strip()
+            imp_tracker = extract_impression_url(tag_row.get('Impression Tracker', ''))
 
-    updated_df = pd.DataFrame(updated_rows)
+            # Update URL
+            updated_url = click_url
+            if click_tracker:
+                updated_url = f"{click_tracker}{click_url}"
+
+            if '?utm_source=' not in updated_url:
+                updated_url += f"?utm_source=tiktok&utm_medium=paid&utm_campaign={campaign}&tf_campaign={campaign}"
+            if '&tf_source=' not in updated_url:
+                updated_url += '&tf_source=tiktok'
+            if '&tf_medium=' not in updated_url:
+                updated_url += '&tf_medium=paid_social'
+
+            df_ads.at[idx, 'Click URL'] = updated_url
+
+            # Store impression tracker
+            impression_trackers.append(imp_tracker or "")
+        else:
+            # No match found: still check for missing UTM/TF
+            updated_url = click_url
+            if '?utm_source=' not in updated_url:
+                updated_url += f"?utm_source=tiktok&utm_medium=paid&utm_campaign={campaign}&tf_campaign={campaign}"
+            if '&tf_source=' not in updated_url:
+                updated_url += '&tf_source=tiktok'
+            if '&tf_medium=' not in updated_url:
+                updated_url += '&tf_medium=paid_social'
+            df_ads.at[idx, 'Click URL'] = updated_url
+            impression_trackers.append("")
+
+    df_ads['Impression Tracker'] = impression_trackers
+
+    # Save to Excel
     output = io.BytesIO()
-    with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
-        updated_df.to_excel(writer, index=False, sheet_name="Ads")
+    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+        df_ads.to_excel(writer, sheet_name="Ads", index=False)
+
     output.seek(0)
     return output
