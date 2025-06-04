@@ -56,7 +56,7 @@ def process_files(tiktok_file, tag_files):
     df_ads = pd.read_excel(tiktok_file, sheet_name='Ads')
 
     # Ensure required columns
-    required_cols = ['Campaign Name', 'Placement Name', 'Ad Name']
+    required_cols = ['Campaign Name', 'Ad Group Name', 'Ad Name']
     for col in required_cols:
         if col not in df_ads.columns:
             raise ValueError(f"Missing required column '{col}' in TikTok Ads sheet")
