@@ -52,12 +52,17 @@ def match_rows(tiktok_row, tag_df):
 def process_files(tiktok_file, tag_files):
     # Read TikTok file
     tiktok_df = pd.read_excel(tiktok_file, sheet_name='Ads')
-    required_cols = ['Campaign Name', 'Ad Group Name', 'Ad Name', 'Click URL']
+    required_cols = ['Campaign Name', 'Ad Group Name', 'Ad Name']
     for col in required_cols:
         if col not in tiktok_df.columns:
             raise ValueError(f"Missing required column '{col}' in TikTok Ads sheet")
 
-    # Read tag files (header in row 11)
+    # Accept either Click URL or Web URL
+    url_column = 'Click URL' if 'Click URL' in tiktok_df.columns else 'Web URL' if 'Web URL' in tiktok_df.columns else None
+    if url_column is None:
+        raise ValueError("Missing 'Click URL' or 'Web URL' column in TikTok Ads sheet")
+
+    # Read tag files (headers start at row 11)
     tag_dfs = []
     for f in tag_files:
         try:
@@ -70,12 +75,13 @@ def process_files(tiktok_file, tag_files):
         raise ValueError("No valid tag data found. Make sure the sheets include 'Campaign Name'.")
     tags_df = pd.concat(tag_dfs, ignore_index=True)
 
+    # Create impression column if missing
     if 'Impression tracking URL' not in tiktok_df.columns:
         tiktok_df['Impression tracking URL'] = ''
 
     for idx, row in tiktok_df.iterrows():
         campaign = str(row['Campaign Name']).strip()
-        original_url = row.get('Click URL', '')
+        original_url = row.get(url_column, '')
         updated_url = update_url_params(original_url, campaign)
 
         tag_row = match_rows(row, tags_df)
@@ -89,7 +95,7 @@ def process_files(tiktok_file, tag_files):
             if impression_tag:
                 tiktok_df.at[idx, 'Impression tracking URL'] = impression_tag
 
-        tiktok_df.at[idx, 'Click URL'] = updated_url
+        tiktok_df.at[idx, url_column] = updated_url
 
     # Save to memory buffer
     output = io.BytesIO()
