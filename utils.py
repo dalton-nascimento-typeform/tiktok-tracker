@@ -4,69 +4,68 @@ import re
 from urllib.parse import urlparse, parse_qsl, urlencode, urlunparse
 
 def extract_impression_url(s):
-    if not isinstance(s, str):
+    if pd.isna(s):
         return ''
-    m = re.search(r'"(https://[^"]+)"', s)
-    return m.group(1) if m else ''
+    match = re.search(r'"(https://[^"]+)"', s)
+    return match.group(1) if match else ''
 
 def ensure_params(url, campaign):
-    if not isinstance(url, str):
-        return url
-    parsed = urlparse(url)
-    params = dict(parse_qsl(parsed.query))
-    # Always use actual campaign name from current row
-    params.setdefault('utm_source', 'tiktok')
-    params.setdefault('utm_medium', 'paid')
-    params.setdefault('utm_campaign', campaign)
-    params.setdefault('tf_source', 'tiktok')
-    params.setdefault('tf_medium', 'paid_social')
-    params.setdefault('tf_campaign', campaign)
-    new_query = urlencode(params)
-    return urlunparse(parsed._replace(query=new_query))
+    if pd.isna(url):
+        return ''
+    parsed_url = urlparse(url)
+    params = dict(parse_qsl(parsed_url.query))
+
+    params['utm_source'] = 'tiktok'
+    params['utm_medium'] = 'paid'
+    params['utm_campaign'] = campaign  # Actual campaign name
+    params['tf_source'] = 'tiktok'
+    params['tf_medium'] = 'paid_social'
+    params['tf_campaign'] = campaign   # Actual campaign name
+
+    return urlunparse(parsed_url._replace(query=urlencode(params)))
 
 def process_files(tiktok_file, tag_files):
     df_ads = pd.read_excel(tiktok_file, sheet_name='Ads')
     tag_dfs = [pd.read_excel(f, header=10) for f in tag_files]
     df_tags = pd.concat(tag_dfs, ignore_index=True)
 
-    # --- Robust column handling
-    web_url_col = 'Web URL'
-    click_col = 'Click Tracking URL'
-    impr_col = 'Impression Tracking URL'
-    # If not present, create columns
-    if click_col not in df_ads.columns:
-        df_ads[click_col] = ''
-    if impr_col not in df_ads.columns:
-        df_ads[impr_col] = ''
+    # Ensure columns exist
+    for col in ['Click Tracking URL', 'Impression Tracking URL']:
+        if col not in df_ads.columns:
+            df_ads[col] = ''
 
     for idx, row in df_ads.iterrows():
-        campaign = str(row['Campaign Name']).strip()
-        adgroup = str(row['Ad Group Name']).strip()
-        adname = str(row['Ad Name']).strip()
+        campaign = row['Campaign Name'].strip()
+        ad_group = row['Ad Group Name'].strip()
+        ad_name = row['Ad Name'].strip()
 
-        tag_match = df_tags[
+        matched_tag = df_tags[
             (df_tags['Campaign Name'].astype(str).str.strip() == campaign) &
-            (df_tags['Placement Name'].astype(str).str.strip() == adgroup) &
-            (df_tags['Ad Name'].astype(str).str.strip() == adname)
+            (df_tags['Placement Name'].astype(str).str.strip() == ad_group) &
+            (df_tags['Ad Name'].astype(str).str.strip() == ad_name)
         ]
 
-        # Web URL: always ensure params
-        web_url = row[web_url_col]
-        df_ads.at[idx, web_url_col] = ensure_params(web_url, campaign)
+        # Update Web URL (UTM/TF)
+        original_url = row['Web URL']
+        updated_url = ensure_params(original_url, campaign)
+        df_ads.at[idx, 'Web URL'] = updated_url
 
-        # Click Tracking URL: only if match
-        if not tag_match.empty:
-            click_tracker = tag_match.iloc[0].get('Click Tag') or tag_match.iloc[0].get('Click Tracker', '')
-            if pd.notna(click_tracker):
-                df_ads.at[idx, click_col] = click_tracker
+        if not matched_tag.empty:
+            matched_row = matched_tag.iloc[0]
 
-            # Impression Tracking URL: only if match
-            imp_tag = tag_match.iloc[0].get('Impression Tag') or tag_match.iloc[0].get('Impression Tracker', '')
-            if pd.notna(imp_tag):
-                df_ads.at[idx, impr_col] = extract_impression_url(str(imp_tag))
+            # Click Tracking URL
+            click_tag = matched_row.get('Click Tag') or matched_row.get('Click Tracker')
+            if pd.notna(click_tag):
+                df_ads.at[idx, 'Click Tracking URL'] = click_tag.strip()
 
+            # Impression Tracking URL
+            impression_tag = matched_row.get('Impression Tag') or matched_row.get('Impression Tracker')
+            impression_url = extract_impression_url(impression_tag)
+            df_ads.at[idx, 'Impression Tracking URL'] = impression_url.strip()
+
+    # Save to Excel in memory
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-        df_ads.to_excel(writer, sheet_name='Ads', index=False)
+        df_ads.to_excel(writer, index=False, sheet_name='Ads')
     output.seek(0)
     return output
